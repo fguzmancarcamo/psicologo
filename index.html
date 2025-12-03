@@ -1,525 +1,147 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInAnonymously, 
-  onAuthStateChanged,
-  signInWithCustomToken
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
-  doc, 
-  onSnapshot, 
-  serverTimestamp, 
-  query, 
-  orderBy 
-} from 'firebase/firestore';
-import { 
-  Calendar, 
-  UserPlus, 
-  Search, 
-  Clock, 
-  CheckCircle2, 
-  AlertCircle, 
-  MoreVertical, 
-  Trash2, 
-  Edit2, 
-  Activity,
-  CalendarCheck
-} from 'lucide-react';
-
-// --- Firebase Configuration ---
-const firebaseConfig = JSON.parse(__firebase_config);
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-
-// --- Helpers ---
-const formatDate = (dateString) => {
-  if (!dateString) return 'Sin fecha';
-  const options = { year: 'numeric', month: 'long', day: 'numeric' };
-  return new Date(dateString + 'T00:00:00').toLocaleDateString('es-ES', options);
-};
-
-const getNextAppointmentDate = (lastVisitDate) => {
-  if (!lastVisitDate) return '';
-  const date = new Date(lastVisitDate + 'T00:00:00');
-  date.setMonth(date.getMonth() + 1);
-  return date.toISOString().split('T')[0];
-};
-
-const getStatusColor = (nextDate) => {
-  if (!nextDate) return 'bg-gray-100 text-gray-600 border-gray-200';
-  const today = new Date();
-  today.setHours(0,0,0,0);
-  const next = new Date(nextDate + 'T00:00:00');
-  
-  const diffTime = next - today;
-  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-  if (diffDays < 0) return 'bg-red-50 text-red-700 border-red-200'; // Atrasado
-  if (diffDays <= 7) return 'bg-amber-50 text-amber-700 border-amber-200'; // Próxima semana
-  return 'bg-emerald-50 text-emerald-700 border-emerald-200'; // A tiempo
-};
-
-const getStatusText = (nextDate) => {
-    if (!nextDate) return 'Sin programar';
-    const today = new Date();
-    today.setHours(0,0,0,0);
-    const next = new Date(nextDate + 'T00:00:00');
-    
-    const diffTime = next - today;
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-  
-    if (diffDays < 0) return `Atrasada por ${Math.abs(diffDays)} días`;
-    if (diffDays === 0) return 'Es hoy';
-    if (diffDays <= 7) return `En ${diffDays} días`;
-    return 'Programada';
-};
-
-// --- Components ---
-
-const Modal = ({ isOpen, onClose, title, children }) => {
-  if (!isOpen) return null;
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden animate-fade-in">
-        <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-slate-50">
-          <h3 className="text-lg font-semibold text-slate-800">{title}</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors">
-            ✕
-          </button>
-        </div>
-        <div className="p-6">
-          {children}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-export default function App() {
-  const [user, setUser] = useState(null);
-  const [patients, setPatients] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
-  
-  // Modal States
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [editingPatient, setEditingPatient] = useState(null);
-  
-  // Form State
-  const initialFormState = {
-    name: '',
-    diagnosis: '',
-    firstVisit: new Date().toISOString().split('T')[0],
-    lastVisit: new Date().toISOString().split('T')[0],
-  };
-  const [formData, setFormData] = useState(initialFormState);
-
-  // --- Auth & Data Loading ---
-  useEffect(() => {
-    const initAuth = async () => {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-            await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-            await signInAnonymously(auth);
-        }
-    };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (!user) return;
-
-    const q = collection(db, 'artifacts', appId, 'users', user.uid, 'patients');
-    
-    // Using onSnapshot for real-time updates
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const patientsData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      // Ordenar en cliente para evitar índices compuestos complejos
-      patientsData.sort((a, b) => {
-          // Ordenar por fecha de próxima visita (ascendente -> los más urgentes primero)
-          const nextA = getNextAppointmentDate(a.lastVisit);
-          const nextB = getNextAppointmentDate(b.lastVisit);
-          if (nextA < nextB) return -1;
-          if (nextA > nextB) return 1;
-          return 0;
-      });
-      setPatients(patientsData);
-      setLoading(false);
-    }, (error) => {
-      console.error("Error fetching patients:", error);
-      setLoading(false);
-    });
-
-    return () => unsubscribe();
-  }, [user]);
-
-  // --- Handlers ---
-
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!user) return;
-
-    try {
-      const collectionRef = collection(db, 'artifacts', appId, 'users', user.uid, 'patients');
-      
-      if (editingPatient) {
-        await updateDoc(doc(collectionRef, editingPatient.id), {
-          ...formData,
-          updatedAt: serverTimestamp()
-        });
-      } else {
-        await addDoc(collectionRef, {
-          ...formData,
-          createdAt: serverTimestamp()
-        });
-      }
-      
-      closeModal();
-    } catch (error) {
-      console.error("Error saving patient:", error);
-    }
-  };
-
-  const handleDelete = async (patientId) => {
-    if (!user || !window.confirm('¿Estás seguro de eliminar este paciente?')) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'patients', patientId));
-    } catch (error) {
-      console.error("Error deleting:", error);
-    }
-  };
-
-  const handleQuickUpdate = async (patient) => {
-    if (!user) return;
-    const today = new Date().toISOString().split('T')[0];
-    try {
-        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'patients', patient.id), {
-            lastVisit: today,
-            updatedAt: serverTimestamp()
-        });
-    } catch (error) {
-        console.error("Error quick update:", error);
-    }
-  };
-
-  const openAddModal = () => {
-    setFormData(initialFormState);
-    setEditingPatient(null);
-    setIsAddModalOpen(true);
-  };
-
-  const openEditModal = (patient) => {
-    setFormData({
-      name: patient.name,
-      diagnosis: patient.diagnosis,
-      firstVisit: patient.firstVisit,
-      lastVisit: patient.lastVisit
-    });
-    setEditingPatient(patient);
-    setIsAddModalOpen(true);
-  };
-
-  const closeModal = () => {
-    setIsAddModalOpen(false);
-    setEditingPatient(null);
-  };
-
-  const filteredPatients = useMemo(() => {
-    return patients.filter(p => 
-      p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (p.diagnosis && p.diagnosis.toLowerCase().includes(searchTerm.toLowerCase()))
-    );
-  }, [patients, searchTerm]);
-
-  // --- Stats ---
-  const stats = useMemo(() => {
-      const total = patients.length;
-      const overdue = patients.filter(p => {
-          const next = getNextAppointmentDate(p.lastVisit);
-          const diff = new Date(next) - new Date();
-          return diff < 0;
-      }).length;
-      const thisWeek = patients.filter(p => {
-        const next = getNextAppointmentDate(p.lastVisit);
-        const today = new Date();
-        const nextDate = new Date(next);
-        const diffDays = (nextDate - today) / (1000 * 60 * 60 * 24);
-        return diffDays >= 0 && diffDays <= 7;
-      }).length;
-      return { total, overdue, thisWeek };
-  }, [patients]);
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <div className="text-slate-500 flex flex-col items-center gap-2">
-          <Activity className="animate-spin w-8 h-8 text-indigo-600" />
-          <p>Cargando datos del centro...</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans">
-      {/* Header */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="bg-indigo-600 p-2 rounded-lg">
-              <Activity className="w-5 h-5 text-white" />
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuroRehab Control</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="min-h-screen bg-slate-50 text-slate-800 font-sans">
+        <!-- Header -->
+        <header class="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <div class="bg-indigo-600 p-2 rounded-lg">
+                        <div class="w-5 h-5 text-white animate-pulse"></div>
+                    </div>
+                    <h1 class="text-xl font-bold bg-gradient-to-r from-indigo-700 to-indigo-500 bg-clip-text text-transparent hidden sm:block">
+                        NeuroRehab Control
+                    </h1>
+                </div>
+                <button id="btnNuevoPaciente" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-medium transition-all shadow-md hover:shadow-lg active:scale-95">
+                    <div class="w-4 h-4"></div>
+                    <span class="hidden sm:inline">Nuevo Paciente</span>
+                    <span class="sm:hidden">Nuevo</span>
+                </button>
             </div>
-            <h1 className="text-xl font-bold bg-gradient-to-r from-indigo-700 to-indigo-500 bg-clip-text text-transparent hidden sm:block">
-              NeuroRehab Control
-            </h1>
-          </div>
-          <button 
-            onClick={openAddModal}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-medium transition-all shadow-md hover:shadow-lg active:scale-95"
-          >
-            <UserPlus className="w-4 h-4" />
-            <span className="hidden sm:inline">Nuevo Paciente</span>
-            <span className="sm:hidden">Nuevo</span>
-          </button>
-        </div>
-      </header>
+        </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-            <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex items-center gap-4">
-                <div className="bg-blue-100 p-3 rounded-full text-blue-600">
-                    <UserPlus className="w-6 h-6" />
-                </div>
-                <div>
-                    <p className="text-sm text-slate-500">Total Pacientes</p>
-                    <p className="text-2xl font-bold text-slate-800">{stats.total}</p>
-                </div>
-            </div>
-            <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex items-center gap-4">
-                <div className="bg-amber-100 p-3 rounded-full text-amber-600">
-                    <Calendar className="w-6 h-6" />
-                </div>
-                <div>
-                    <p className="text-sm text-slate-500">Esta Semana</p>
-                    <p className="text-2xl font-bold text-slate-800">{stats.thisWeek}</p>
-                </div>
-            </div>
-            <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex items-center gap-4">
-                <div className="bg-red-100 p-3 rounded-full text-red-600">
-                    <AlertCircle className="w-6 h-6" />
-                </div>
-                <div>
-                    <p className="text-sm text-slate-500">Atrasados</p>
-                    <p className="text-2xl font-bold text-slate-800">{stats.overdue}</p>
-                </div>
-            </div>
-        </div>
-
-        {/* Filters */}
-        <div className="mb-6 relative">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <Search className="h-5 w-5 text-gray-400" />
-          </div>
-          <input
-            type="text"
-            placeholder="Buscar por nombre o diagnóstico..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="block w-full pl-10 pr-3 py-3 border border-gray-200 rounded-xl leading-5 bg-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm shadow-sm transition-all"
-          />
-        </div>
-
-        {/* Patient Grid */}
-        {filteredPatients.length === 0 ? (
-          <div className="text-center py-20 bg-white rounded-2xl border border-dashed border-slate-300">
-            <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-50 mb-4">
-              <Search className="h-6 w-6 text-indigo-400" />
-            </div>
-            <h3 className="text-lg font-medium text-gray-900">No se encontraron pacientes</h3>
-            <p className="mt-1 text-sm text-gray-500">Intenta ajustar tu búsqueda o agrega un nuevo paciente.</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-            {filteredPatients.map((patient) => {
-              const nextDate = getNextAppointmentDate(patient.lastVisit);
-              const statusColor = getStatusColor(nextDate);
-              const statusText = getStatusText(nextDate);
-
-              return (
-                <div key={patient.id} className="bg-white rounded-xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow duration-200 flex flex-col">
-                  {/* Card Header */}
-                  <div className="p-5 flex justify-between items-start border-b border-slate-50">
+        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            <!-- Stats Grid -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon blue"></div>
                     <div>
-                      <h3 className="font-bold text-slate-800 text-lg">{patient.name}</h3>
-                      <span className="text-sm font-medium text-slate-500 bg-slate-100 px-2 py-0.5 rounded mt-1 inline-block">
-                        {patient.diagnosis || 'Sin diagnóstico'}
-                      </span>
+                        <p class="stat-label">Total Pacientes</p>
+                        <p class="stat-value">0</p>
                     </div>
-                    <div className="flex gap-1">
-                        <button 
-                            onClick={() => openEditModal(patient)} 
-                            className="p-1.5 hover:bg-slate-100 text-slate-400 hover:text-indigo-600 rounded-lg transition-colors"
-                            title="Editar"
-                        >
-                            <Edit2 className="w-4 h-4" />
-                        </button>
-                        <button 
-                            onClick={() => handleDelete(patient.id)}
-                            className="p-1.5 hover:bg-slate-100 text-slate-400 hover:text-red-600 rounded-lg transition-colors"
-                            title="Eliminar"
-                        >
-                            <Trash2 className="w-4 h-4" />
-                        </button>
-                    </div>
-                  </div>
-
-                  {/* Card Body */}
-                  <div className="p-5 flex-1">
-                    <div className="space-y-4">
-                      {/* Dates Row */}
-                      <div className="grid grid-cols-2 gap-4">
-                         <div>
-                            <p className="text-xs text-slate-400 uppercase tracking-wide font-semibold mb-1">Primera Vez</p>
-                            <div className="flex items-center text-slate-600 text-sm">
-                                <Clock className="w-3.5 h-3.5 mr-1.5" />
-                                {formatDate(patient.firstVisit)}
-                            </div>
-                         </div>
-                         <div>
-                            <p className="text-xs text-slate-400 uppercase tracking-wide font-semibold mb-1">Última Vez</p>
-                            <div className="flex items-center text-slate-600 text-sm">
-                                <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" />
-                                {formatDate(patient.lastVisit)}
-                            </div>
-                         </div>
-                      </div>
-
-                      {/* Status Box */}
-                      <div className={`rounded-lg p-3 border ${statusColor} flex flex-col gap-1`}>
-                        <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold uppercase tracking-wide opacity-80">Próxima Atención</span>
-                            <span className="text-xs font-bold px-2 py-0.5 bg-white bg-opacity-50 rounded-full">{statusText}</span>
-                        </div>
-                        <div className="font-semibold text-lg flex items-center">
-                            <CalendarCheck className="w-5 h-5 mr-2 opacity-80" />
-                            {formatDate(nextDate)}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Card Footer - Actions */}
-                  <div className="p-4 bg-slate-50 border-t border-slate-100 rounded-b-xl">
-                    <button
-                        onClick={() => handleQuickUpdate(patient)}
-                        className="w-full py-2 bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50 hover:border-indigo-300 rounded-lg text-sm font-medium transition-all shadow-sm flex justify-center items-center gap-2 group"
-                    >
-                        <CheckCircle2 className="w-4 h-4 group-hover:scale-110 transition-transform" />
-                        Atendido Hoy
-                    </button>
-                  </div>
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </main>
+                <div class="stat-card">
+                    <div class="stat-icon amber"></div>
+                    <div>
+                        <p class="stat-label">Esta Semana</p>
+                        <p class="stat-value">0</p>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon red"></div>
+                    <div>
+                        <p class="stat-label">Atrasados</p>
+                        <p class="stat-value">0</p>
+                    </div>
+                </div>
+            </div>
 
-      {/* Add/Edit Modal */}
-      <Modal
-        isOpen={isAddModalOpen}
-        onClose={closeModal}
-        title={editingPatient ? 'Editar Paciente' : 'Nuevo Paciente'}
-      >
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">Nombre Completo</label>
-            <input
-              required
-              name="name"
-              type="text"
-              value={formData.name}
-              onChange={handleInputChange}
-              className="w-full rounded-lg border-gray-300 border px-3 py-2 focus:ring-indigo-500 focus:border-indigo-500"
-              placeholder="Ej. Juan Pérez"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">Diagnóstico / Motivo</label>
-            <input
-              name="diagnosis"
-              type="text"
-              value={formData.diagnosis}
-              onChange={handleInputChange}
-              className="w-full rounded-lg border-gray-300 border px-3 py-2 focus:ring-indigo-500 focus:border-indigo-500"
-              placeholder="Ej. Ansiedad, Rehabilitación física..."
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Primera Atención</label>
-              <input
-                required
-                name="firstVisit"
-                type="date"
-                value={formData.firstVisit}
-                onChange={handleInputChange}
-                className="w-full rounded-lg border-gray-300 border px-3 py-2 focus:ring-indigo-500 focus:border-indigo-500"
-              />
+            <!-- Filters -->
+            <div class="mb-6 relative">
+                <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <div class="w-5 h-5 text-gray-400"></div>
+                </div>
+                <input 
+                    type="text" 
+                    id="searchInput" 
+                    placeholder="Buscar por nombre o diagnóstico..." 
+                    class="search-input"
+                >
             </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Última Atención</label>
-              <input
-                required
-                name="lastVisit"
-                type="date"
-                value={formData.lastVisit}
-                onChange={handleInputChange}
-                className="w-full rounded-lg border-gray-300 border px-3 py-2 focus:ring-indigo-500 focus:border-indigo-500"
-              />
-              <p className="text-xs text-gray-400 mt-1">La próxima cita se calculará +1 mes desde aquí.</p>
+
+            <!-- Patient Grid -->
+            <div id="patientGrid" class="patient-grid">
+                <!-- Los pacientes se cargarán dinámicamente aquí -->
+                <div class="text-center py-20 bg-white rounded-2xl border border-dashed border-slate-300">
+                    <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-50 mb-4">
+                        <div class="w-6 h-6 text-indigo-400"></div>
+                    </div>
+                    <h3 class="text-lg font-medium text-gray-900">No se encontraron pacientes</h3>
+                    <p class="mt-1 text-sm text-gray-500">Intenta ajustar tu búsqueda o agrega un nuevo paciente.</p>
+                </div>
             </div>
-          </div>
-          
-          <div className="pt-4 flex gap-3">
-             <button
-              type="button"
-              onClick={closeModal}
-              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-slate-700 hover:bg-gray-50 font-medium"
-            >
-              Cancelar
-            </button>
-            <button
-              type="submit"
-              className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium shadow-md"
-            >
-              {editingPatient ? 'Guardar Cambios' : 'Agregar Paciente'}
-            </button>
-          </div>
-        </form>
-      </Modal>
+        </main>
+
+        <!-- Modal -->
+        <div id="modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="modalTitle" class="modal-title">Nuevo Paciente</h3>
+                    <button id="closeModal" class="modal-close">✕</button>
+                </div>
+                <div class="modal-body">
+                    <form id="patientForm">
+                        <div class="form-group">
+                            <label class="form-label">Nombre Completo</label>
+                            <input 
+                                type="text" 
+                                id="name" 
+                                name="name" 
+                                class="form-input"
+                                placeholder="Ej. Juan Pérez"
+                                required
+                            >
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Diagnóstico / Motivo</label>
+                            <input 
+                                type="text" 
+                                id="diagnosis" 
+                                name="diagnosis" 
+                                class="form-input"
+                                placeholder="Ej. Ansiedad, Rehabilitación física..."
+                            >
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="form-group">
+                                <label class="form-label">Primera Atención</label>
+                                <input 
+                                    type="date" 
+                                    id="firstVisit" 
+                                    name="firstVisit" 
+                                    class="form-input"
+                                    required
+                                >
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Última Atención</label>
+                                <input 
+                                    type="date" 
+                                    id="lastVisit" 
+                                    name="lastVisit" 
+                                    class="form-input"
+                                    required
+                                >
+                                <p class="text-xs text-gray-400 mt-1">La próxima cita se calculará +1 mes desde aquí.</p>
+                            </div>
+                        </div>
+                        <div class="modal-actions">
+                            <button type="button" id="cancelModal" class="btn-cancel">Cancelar</button>
+                            <button type="submit" class="btn-submit">Agregar Paciente</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
     </div>
-  );
-}
+
+    <script src="script.js"></script>
+</body>
+</html>
